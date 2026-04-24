@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Web Search Skill</title>
+  <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+  <main id="card" aria-live="polite">
+    <h1 id="status">Searching…</h1>
+    <ol id="sources"></ol>
+  </main>
+
+  <script type="module">
+    import { search } from "../assets/search.js";
+    import { extract } from "../assets/extract.js";
+    import { distill } from "../assets/distill.js";
+    import { formatContext } from "../assets/format.js";
+
+    const statusEl = document.getElementById("status");
+    const sourcesEl = document.getElementById("sources");
+
+    function setStatus(msg) { if (statusEl) statusEl.textContent = msg; }
+    function renderSource(s) {
+      if (!sourcesEl) return;
+      const li = document.createElement("li");
+      const a = document.createElement("a");
+      a.href = s.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+      a.textContent = s.title || s.url;
+      li.appendChild(a);
+      sourcesEl.appendChild(li);
+    }
+
+    window["ai_edge_gallery_get_result"] = async (dataStr, secret) => {
+      try {
+        const { query } = JSON.parse(dataStr || "{}");
+        if (!query || typeof query !== "string") {
+          return JSON.stringify({ error: "missing query" });
+        }
+
+        setStatus(`Searching: "${query}"`);
+        const hits = await search(query, { secret, topN: 3, timeoutMs: 8000 });
+        if (!hits || hits.length === 0) {
+          return JSON.stringify({ error: "no search results" });
+        }
+        hits.forEach(renderSource);
+
+        setStatus(`Reading ${hits.length} page${hits.length === 1 ? "" : "s"}…`);
+        const pages = await Promise.all(
+          hits.map(h => extract(h.url, { timeoutMs: 10000 }).catch(e => ({ text: "", failed: true, reason: String(e?.message || e) })))
+        );
+
+        setStatus("Distilling…");
+        const distilled = pages.map((p, i) => ({
+          rank: hits[i].rank,
+          url: hits[i].url,
+          title: hits[i].title,
+          text: p.failed ? "" : distill(p.text, query, { maxTokens: 500 }),
+        }));
+
+        const ctx = formatContext(query, distilled, { totalBudget: 2000 });
+        const okCount = distilled.filter(d => d.text).length;
+        setStatus(`Done — ${okCount}/${hits.length} sources ready`);
+        return JSON.stringify({ result: ctx });
+      } catch (e) {
+        setStatus("Error");
+        return JSON.stringify({ error: String(e?.message || e) });
+      }
+    };
+  </script>
+</body>
+</html>

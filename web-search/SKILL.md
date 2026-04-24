@@ -1,0 +1,71 @@
+---
+name: web-search
+description: Search the web and read the top 3 result pages to answer questions about current events, prices, recent releases, and anything outside your training data.
+metadata:
+  require-secret: true
+  require-secret-description: |
+    Optional. Leave blank for free default (DuckDuckGo via Jina Reader, no API key).
+    For higher-quality results, paste ONE line:
+      jina=<JINA_API_KEY>
+      brave=<BRAVE_API_KEY>
+      google=<GOOGLE_CSE_KEY>|cx=<GOOGLE_CSE_CX>
+      serpapi=<SERPAPI_KEY>
+      bing=<BING_API_KEY>
+---
+
+# When to use this skill
+
+Call this skill when the user's question needs **current, factual, or out-of-training-data** information, for example:
+
+- News, current events, sports scores, stock prices
+- Product releases, version numbers, specs, prices
+- "What is X?" where X was released after your training cutoff
+- Anything where a stale answer would be wrong or misleading
+
+Do **not** call this skill for:
+- Casual conversation or opinion questions
+- Coding or math tasks the model can solve directly
+- Questions the user explicitly says are hypothetical
+
+# How to invoke
+
+Call the `run_js` tool with these exact parameters:
+
+- **script name:** `index.html`
+- **data:** a JSON string of the shape `{ "query": "<search query you crafted>" }`
+
+# Crafting the query (important)
+
+Do **NOT** forward the user's message verbatim. Rewrite it into a focused **3–10 word search query** before calling the tool.
+
+- Keep proper nouns, product names, version numbers, and dates exactly as the user wrote them.
+- If the question is time-sensitive ("latest", "recent", "now", "yesterday", "this year"), include the **current year**.
+- Drop pleasantries, filler, and meta-talk ("hey", "I was wondering", "can you tell me").
+- Prefer **noun phrases** over full sentences, but do NOT reduce to a bare keyword list — modern search engines rank better on natural phrases.
+- If the user asks multiple things, pick the single most important one for this call. You can call the skill again for the others.
+
+Examples:
+
+| User message | Good query |
+|---|---|
+| "Hey, I was wondering what the latest iPhone is and how much it costs" | `iPhone 2026 latest model price` |
+| "who won the champions league final yesterday" | `Champions League final 2026 winner` |
+| "explain the new React 20 server components" | `React 20 server components changes` |
+| "tell me about the Gemma 4 release" | `Gemma 4 release announcement 2026` |
+
+# After the tool returns
+
+You will receive `{ "result": "<markdown block>" }` containing up to 3 sources, each with a title, URL, and distilled excerpt.
+
+- Write a concise answer, **2–4 sentences**, based **only** on the sources provided.
+- Cite sources inline as `[S1]`, `[S2]`, `[S3]` matching the source headers.
+- If two sources disagree, note the disagreement briefly.
+- If a source is marked `(fetch failed)`, ignore it and use the others.
+- If all sources failed, tell the user the search did not return usable results and suggest rephrasing.
+
+# Error handling
+
+If the tool returns `{ "error": "<message>" }`:
+- If the error mentions "missing query", re-invoke with a proper query.
+- If the error mentions "rate limit" or "auth", tell the user the search provider is unavailable and that they may need to update the skill's secret.
+- For any other error, apologize briefly and answer from your own knowledge if possible, noting it may be out of date.
