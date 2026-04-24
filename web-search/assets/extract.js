@@ -29,11 +29,22 @@ async function viaJinaReader(url) {
 }
 
 // Jina Reader prepends a few metadata lines (Title:, URL Source:, Published Time:,
-// Markdown Content:). Strip those so only the article remains.
+// Markdown Content:). Strip those and then clean markdown artifacts that would
+// otherwise pollute the distiller (images, link URLs, heading markers).
 function stripReaderBoilerplate(md) {
   const marker = /\n\s*Markdown Content:\s*\n/i;
   const m = md.match(marker);
-  return m ? md.slice(m.index + m[0].length) : md;
+  const body = m ? md.slice(m.index + m[0].length) : md;
+  return body
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")             // images
+    .replace(/\[\s*\]\s*\(?[^)]*\)?/g, "")            // empty-text links like []() or []
+    .replace(/\[([^\]]+)\]\(https?:[^)]+\)/g, "$1")   // keep link text, drop URL
+    .replace(/\((?:https?:[^)]{10,})\)/g, "")         // stray bare URLs in parens
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")               // heading markers
+    .replace(/^\s*>\s?/gm, "")                        // blockquote markers
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 }
 
 async function viaDirectFetch(url) {

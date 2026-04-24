@@ -63,11 +63,24 @@ function parseDdgMarkdown(md) {
   return hits;
 }
 
+const AD_MARKERS = [
+  "/y.js",            // DDG sponsored link endpoint
+  "bing.com/aclick",  // Bing ad click
+  "bing.com/ck/a",    // Bing ad redirect
+  "googleadservices.com",
+  "/doubleclick.net",
+];
+
 function decodeDdgRedirect(redirect) {
   try {
     const u = new URL(redirect, "https://duckduckgo.com");
+    if (AD_MARKERS.some(m => redirect.includes(m))) return null;
     const uddg = u.searchParams.get("uddg");
-    if (uddg) return decodeURIComponent(uddg);
+    if (uddg) {
+      const decoded = decodeURIComponent(uddg);
+      if (AD_MARKERS.some(m => decoded.includes(m))) return null;
+      return decoded;
+    }
     if (/^https?:\/\//i.test(redirect)) return redirect;
   } catch (_) { /* fall through */ }
   return null;

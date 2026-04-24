@@ -73,7 +73,34 @@ function splitSentences(text) {
   const abbrevGuarded = cleaned
     .replace(/\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e|U\.S|U\.K|No)\./gi, "$1<DOT>");
   const parts = abbrevGuarded.split(/(?<=[.!?])\s+(?=[A-Z0-9"“‘(])/);
-  return parts.map(p => p.replace(/<DOT>/g, ".").trim()).filter(p => p.length > 0);
+  return parts
+    .map(p => p.replace(/<DOT>/g, ".").trim())
+    .filter(isProseSentence);
+}
+
+// Reject fragments that look like image captions, attribution, navigation
+// labels, or markdown leftovers — they often contain query terms and would
+// otherwise rank highly but carry no real information.
+function isProseSentence(s) {
+  if (!s || s.length < 30) return false;
+  // Must contain at least a few letters.
+  const letters = (s.match(/[A-Za-z\u00c0-\u024f]/g) || []).length;
+  if (letters < s.length * 0.5) return false;
+  // Prose needs whitespace between words — nav menus like
+  // "U.S.PoliticsSportsEntertainmentLife..." have barely any.
+  const words = s.split(/\s+/).filter(Boolean).length;
+  if (words < 6) return false;
+  const avgWordLen = letters / words;
+  if (avgWordLen > 12) return false; // likely concatenated nav labels
+  // CamelCase runs of 3+ capitalized words with no spaces are navigation.
+  if (/([A-Z][a-z]+){4,}/.test(s.replace(/\s+/g, ""))) return false;
+  // Bracket-heavy (image alt text, citations) usually isn't prose.
+  const brackets = (s.match(/[\[\]()]/g) || []).length;
+  if (brackets > s.length * 0.08) return false;
+  // Pure attribution: "Photo by X / Y Images", "Getty", etc.
+  if (/^\(?\s*(Photo|Image|Credit|Source|Via)\s+by\b/i.test(s)) return false;
+  if (/\b(Getty|Reuters|AFP|AP Photo|NurPhoto)\b/i.test(s) && s.length < 120) return false;
+  return true;
 }
 
 function tokenize(s) {
