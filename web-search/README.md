@@ -59,10 +59,9 @@ Gemma writes the final 2–4 sentence answer with citations
 | File | Purpose |
 |---|---|
 | `SKILL.md` | Manifest + prose instructions Gemma reads. Defines the `run_js` contract and the query-rewriting rules. |
-| `scripts/index.html` | Skill entry point. Loaded by Gallery's webview; loads `index.js` via a plain `<script src>`. |
-| `scripts/index.js` | Self-contained bundle: providers, extractor, distiller, formatter, and `window.ai_edge_gallery_get_result`. No ES-module imports. |
+| `scripts/index.html` | Skill entry point. Loaded by Gallery's webview. All JS is inlined in one `<script>` block — no external files, no ES modules. |
 | `assets/styles.css` | Minimal result card styling. |
-| `tests/test.html` | Desktop harness — loads the exact same `scripts/index.js` via plain `<script src>`. |
+| `tests/test.html` | Desktop harness — loads `scripts/index.html` in an iframe and calls `ai_edge_gallery_get_result` directly, so it exercises the exact bundle Gallery runs. |
 
 ---
 

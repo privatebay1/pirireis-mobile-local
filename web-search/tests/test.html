@@ -9,21 +9,18 @@
     h1 { font-size: 18px; margin-bottom: 4px; }
     p.hint { color: #555; margin-top: 0; }
     label { display: block; font-weight: 600; margin: 12px 0 4px; }
-    input, textarea { width: 100%; font: inherit; padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
+    input { width: 100%; font: inherit; padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
     button { margin-top: 12px; padding: 8px 14px; font: inherit; font-weight: 600; background: #2563eb; color: white; border: 0; border-radius: 6px; cursor: pointer; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     pre { background: #f6f7f9; border: 1px solid #e2e4e8; border-radius: 6px; padding: 12px; white-space: pre-wrap; word-break: break-word; max-height: 540px; overflow: auto; }
-    .timings { color: #555; font-size: 12px; margin: 8px 0 0; }
+    iframe { display: block; width: 100%; height: 120px; border: 1px solid #eee; border-radius: 6px; margin-top: 12px; }
     .row { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
     .row > * { flex: 1; min-width: 200px; }
-    /* Hidden card host — the bundle writes status/sources into #status / #sources.
-       We reuse those IDs so the bundle is happy, but hide the card in the harness. */
-    #card { display: none; }
   </style>
 </head>
 <body>
   <h1>web-search skill — desktop smoke test</h1>
-  <p class="hint">Loads the same bundle Gallery loads (<code>scripts/index.js</code>) via a plain <code>&lt;script src&gt;</code>, then calls <code>window.ai_edge_gallery_get_result</code>. Run from a local static server (CORS requires it).</p>
+  <p class="hint">Loads <code>scripts/index.html</code> in an iframe (same bundle Gallery runs) and calls <code>iframe.contentWindow.ai_edge_gallery_get_result</code>. Serve via a static server (CORS requires it).</p>
 
   <div class="row">
     <div>
@@ -38,60 +35,39 @@
 
   <button id="go">Run skill</button>
 
-  <p class="timings" id="timings"></p>
-
-  <label for="out">Skill output (what Gemma receives)</label>
+  <label for="out">Skill response (JSON Gemma receives)</label>
   <pre id="out">—</pre>
 
-  <!-- IDs the bundle writes into while running. -->
-  <div id="card"><h1 id="status"></h1><ol id="sources"></ol></div>
+  <iframe id="sandbox" src="../scripts/index.html" title="skill sandbox"></iframe>
 
-  <!-- Same non-module bundle Gallery executes. Must load before our driver. -->
-  <script src="../scripts/index.js"></script>
   <script>
-    (function () {
-      const outEl = document.getElementById("out");
-      const timingsEl = document.getElementById("timings");
-      const btn = document.getElementById("go");
-      const W = window.__webSearch;
+    const iframe = document.getElementById("sandbox");
+    const btn = document.getElementById("go");
+    const outEl = document.getElementById("out");
 
-      btn.addEventListener("click", async function () {
-        const query = document.getElementById("q").value.trim();
-        const secret = document.getElementById("secret").value.trim();
-        if (!query) return;
-        btn.disabled = true;
-        outEl.textContent = "Running…";
-        timingsEl.textContent = "";
-        document.getElementById("sources").innerHTML = "";
-
-        const tStart = performance.now();
-        try {
-          const t0 = performance.now();
-          const hits = await W.search(query, { secret: secret, topN: 3, timeoutMs: 8000 });
-          const tSearch = performance.now() - t0;
-
-          const t1 = performance.now();
-          const pages = await Promise.all(hits.map(function (h) {
-            return W.extract(h.url, { timeoutMs: 10000 }).catch(function (e) { return { text: "", failed: true, reason: String((e && e.message) || e) }; });
-          }));
-          const tFetch = performance.now() - t1;
-
-          const t2 = performance.now();
-          const distilled = pages.map(function (p, i) {
-            return { rank: hits[i].rank, url: hits[i].url, title: hits[i].title, text: p.failed ? "" : W.distill(p.text, query, { maxTokens: 500 }) };
-          });
-          const ctx = W.formatContext(query, distilled, { totalBudget: 2000 });
-          const tDistill = performance.now() - t2;
-
-          timingsEl.textContent = "search " + Math.round(tSearch) + "ms · fetch×" + hits.length + " " + Math.round(tFetch) + "ms · distill " + Math.round(tDistill) + "ms · total " + Math.round(performance.now() - tStart) + "ms · ~" + Math.ceil(ctx.length / 4) + " tokens";
-          outEl.textContent = ctx;
-        } catch (e) {
-          outEl.textContent = "ERROR: " + ((e && e.message) || e);
-        } finally {
-          btn.disabled = false;
+    btn.addEventListener("click", async () => {
+      const query = document.getElementById("q").value.trim();
+      const secret = document.getElementById("secret").value.trim();
+      if (!query) return;
+      btn.disabled = true;
+      outEl.textContent = "Running…";
+      try {
+        const fn = iframe.contentWindow && iframe.contentWindow["ai_edge_gallery_get_result"];
+        if (typeof fn !== "function") {
+          outEl.textContent = "ERROR: skill did not expose ai_edge_gallery_get_result — reload the iframe.";
+          return;
         }
-      });
-    })();
+        const tStart = performance.now();
+        const raw = await fn(JSON.stringify({ query }), secret);
+        const t = Math.round(performance.now() - tStart);
+        const parsed = JSON.parse(raw);
+        outEl.textContent = "time: " + t + "ms\n\n" + (parsed.result || ("ERROR: " + parsed.error));
+      } catch (e) {
+        outEl.textContent = "Crash: " + ((e && e.message) || e);
+      } finally {
+        btn.disabled = false;
+      }
+    });
   </script>
 </body>
 </html>
