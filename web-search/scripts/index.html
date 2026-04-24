@@ -340,6 +340,11 @@ function isProseSentence(s) {
   if (brackets > s.length * 0.08) return false;
   if (/^\(?\s*(Photo|Image|Credit|Source|Via)\s+by\b/i.test(s)) return false;
   if (/\b(Getty|Reuters|AFP|AP Photo|NurPhoto)\b/i.test(s) && s.length < 120) return false;
+  // Privacy / cookie / consent boilerplate. These pages contain query terms
+  // ("weather Dublin") in the header/footer, so TF-IDF happily picks them.
+  if (/\b(privacy policy|cookie policy|personal data|we collect|we and our partners|consent|your settings|by clicking|accept all|opt[- ]?out|terms of service|all rights reserved)\b/i.test(s)) return false;
+  // Generic "try searching for X" / "enable javascript" placeholders.
+  if (/^(Try searching|Please enable|You need to enable|This page is|This site uses)\b/i.test(s)) return false;
   return true;
 }
 
@@ -362,32 +367,46 @@ function budgetCount(sentences, maxTokens) {
 
 // ------------------------- format -------------------------
 function formatContext(query, sources, opts) {
-  const totalBudget = Math.max(500, (opts && opts.totalBudget) || 2000);
-  const header = '# Web search: "' + escapeQuotes(query) + '"';
-  const footer = "---\nAnswer the user's question using only the sources above. Cite as [S1], [S2], [S3]. If sources disagree, say so briefly.";
+  // Tighter budget + flatter structure helps small models (Gemma 4 E4B) finish
+  // a synthesis cleanly. Markdown heading hashes and > blockquotes tend to get
+  // parroted back by small models instead of summarized.
+  const totalBudget = Math.max(400, (opts && opts.totalBudget) || 1200);
 
-  const blocks = sources.map(s => {
-    if (!s.text || !s.text.trim()) return "## [S" + s.rank + "] " + titleOf(s) + " — " + s.url + "\n> (fetch failed, skip this source)";
-    return "## [S" + s.rank + "] " + titleOf(s) + " — " + s.url + "\n" + quote(s.text);
-  });
+  const liveSources = sources.filter(s => s.text && s.text.trim());
+  const renderSource = (s, text) =>
+    "Source " + s.rank + " — " + titleOf(s) + "\n" + text.trim() + "\n(url: " + s.url + ")";
 
-  let out = [header, ""].concat(interleave(blocks, ""), ["", footer]).join("\n");
+  function buildBlock(perSourceCap) {
+    const blocks = liveSources.map(s => renderSource(s, perSourceCap ? truncateToTokens(s.text, perSourceCap) : s.text));
+    return [
+      "Web search results for: " + query,
+      "",
+      blocks.join("\n\n"),
+      "",
+      "Using ONLY the sources above, write a short, direct answer (1–3 sentences) to the user's question. Cite inline as [S1], [S2], [S3]. If sources disagree, mention it briefly. Do not add disclaimers.",
+      "",
+      "Answer:",
+    ].join("\n");
+  }
+
+  if (liveSources.length === 0) {
+    return [
+      "Web search results for: " + query,
+      "",
+      "All three sources failed to load.",
+      "",
+      "Tell the user the search did not return usable results and suggest they rephrase.",
+    ].join("\n");
+  }
+
+  let out = buildBlock(null);
   if (estTokens(out) <= totalBudget) return out;
-
-  const headerCost = estTokens([header, "", footer, ""].join("\n") + blocks.map(headerOnly).join("\n"));
-  const perSource = Math.max(80, Math.floor((totalBudget - headerCost) / Math.max(sources.length, 1)));
-  const trimmed = sources.map(s => {
-    if (!s.text || !s.text.trim()) return "## [S" + s.rank + "] " + titleOf(s) + " — " + s.url + "\n> (fetch failed, skip this source)";
-    return "## [S" + s.rank + "] " + titleOf(s) + " — " + s.url + "\n" + quote(truncateToTokens(s.text, perSource));
-  });
-  return [header, ""].concat(interleave(trimmed, ""), ["", footer]).join("\n");
+  const headerCost = estTokens(buildBlock(0));
+  const perSource = Math.max(60, Math.floor((totalBudget - headerCost) / liveSources.length));
+  return buildBlock(perSource);
 }
 
 function titleOf(s) { return (s.title && s.title.trim()) || s.url; }
-function escapeQuotes(s) { return (s || "").replace(/"/g, '\\"'); }
-function quote(text) {
-  return text.split(/\n+/).map(l => "> " + l.trim()).filter(l => l !== "> ").join("\n");
-}
 function estTokens(t) { return Math.ceil((t || "").length / 4); }
 function truncateToTokens(text, tokens) {
   const maxChars = tokens * 4;
@@ -395,12 +414,6 @@ function truncateToTokens(text, tokens) {
   const cut = text.slice(0, maxChars);
   const lb = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
   return (lb > maxChars * 0.6 ? cut.slice(0, lb + 1) : cut) + " …";
-}
-function headerOnly(b) { return b.split("\n")[0]; }
-function interleave(arr, sep) {
-  const out = [];
-  for (let i = 0; i < arr.length; i++) { out.push(arr[i]); if (i < arr.length - 1) out.push(sep); }
-  return out;
 }
 
 // ------------------------- UI helpers -------------------------
@@ -444,7 +457,7 @@ window["ai_edge_gallery_get_result"] = async (dataStr, secret) => {
       text: p.failed ? "" : distill(p.text, query, { maxTokens: 500 }),
     }));
 
-    const ctx = formatContext(query, distilled, { totalBudget: 2000 });
+    const ctx = formatContext(query, distilled, { totalBudget: 1200 });
     const okCount = distilled.filter(d => d.text).length;
     setStatus("Done — " + okCount + "/" + hits.length + " sources ready");
     return JSON.stringify({ result: ctx });

@@ -51,13 +51,13 @@ Do NOT forward the user's message verbatim. Rewrite it into a focused 3–10 wor
 
 ## After the tool returns
 
-You will receive `{ "result": "<markdown block>" }` with up to 3 sources, each with a title, URL, and distilled excerpt.
+You will receive `{ "result": "<text block>" }` ending with `Answer:`. The block lists up to 3 numbered sources (`Source 1`, `Source 2`, `Source 3`) each with a title, distilled excerpt, and URL.
 
-- Write a concise answer, 2–4 sentences, based ONLY on the sources provided.
-- Cite sources inline as [S1], [S2], [S3] matching the source headers.
-- If two sources disagree, note the disagreement briefly.
-- If a source is marked `(fetch failed)`, ignore it and use the others.
-- If all sources failed, tell the user the search did not return usable results and suggest rephrasing.
+- Continue directly after the `Answer:` prefix with a short, direct answer, 1–3 sentences, based ONLY on the sources.
+- Cite inline as [S1], [S2], [S3] matching the source numbers.
+- If two sources disagree, mention the disagreement briefly.
+- Do not include disclaimers or restate the question.
+- If all sources failed, tell the user the search did not return usable results and suggest they rephrase.
 
 ## Error handling
 
