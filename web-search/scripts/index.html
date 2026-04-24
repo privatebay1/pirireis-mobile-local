@@ -312,7 +312,18 @@ function splitSentences(text) {
   const cleaned = text.replace(/\s+/g, " ").trim();
   if (!cleaned) return [];
   const abbrevGuarded = cleaned.replace(/\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e|U\.S|U\.K|No)\./gi, "$1<DOT>");
-  const parts = abbrevGuarded.split(/(?<=[.!?])\s+(?=[A-Z0-9"“‘(])/);
+  // Walk matches of "terminator + whitespace + capital/open-quote starter"
+  // without lookbehind (unsupported on iOS WebKit < 16.4, which hard-fails
+  // the script at parse time).
+  const parts = [];
+  const re = /([.!?])\s+(?=[A-Z0-9"“‘(])/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(abbrevGuarded)) !== null) {
+    parts.push(abbrevGuarded.slice(last, m.index + 1));
+    last = m.index + m[0].length;
+  }
+  if (last < abbrevGuarded.length) parts.push(abbrevGuarded.slice(last));
   return parts.map(p => p.replace(/<DOT>/g, ".").trim()).filter(isProseSentence);
 }
 
