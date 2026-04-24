@@ -51,12 +51,11 @@ Do NOT forward the user's message verbatim. Rewrite it into a focused 3–10 wor
 
 ## After the tool returns
 
-You will receive `{ "result": "<text block>" }` ending with `Answer:`. The block lists up to 3 numbered sources (`Source 1`, `Source 2`, `Source 3`) each with a title, distilled excerpt, and URL.
+You will receive `{ "result": "<short text block>" }` listing up to 3 sources as `[S1] title: excerpt`, ending with an instruction line.
 
-- Continue directly after the `Answer:` prefix with a short, direct answer, 1–3 sentences, based ONLY on the sources.
-- Cite inline as [S1], [S2], [S3] matching the source numbers.
-- If two sources disagree, mention the disagreement briefly.
-- Do not include disclaimers or restate the question.
+- Reply with a short, direct answer — **1–2 sentences** — based ONLY on the sources.
+- Cite inline as [S1], [S2], [S3].
+- Do not restate the question or add disclaimers.
 - If all sources failed, tell the user the search did not return usable results and suggest they rephrase.
 
 ## Error handling
