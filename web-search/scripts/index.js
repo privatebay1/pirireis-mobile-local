@@ -1,0 +1,447 @@
+// Web Search skill — single self-contained bundle.
+// Gallery's webview loads this via <script src="index.js"> (no ES modules)
+// so all helpers live in one file. Entry point: window.ai_edge_gallery_get_result.
+
+(function () {
+  "use strict";
+
+  // ------------------------- SEARCH PROVIDERS -------------------------
+  const AD_MARKERS = [
+    "/y.js",
+    "bing.com/aclick",
+    "bing.com/ck/a",
+    "googleadservices.com",
+    "/doubleclick.net",
+  ];
+
+  async function search(query, opts) {
+    const { secret, topN = 3, timeoutMs = 8000 } = opts || {};
+    const provider = pickProvider(secret);
+    const hits = await withTimeout(provider.fn(query, provider.config), timeoutMs, "search");
+    return hits.slice(0, topN).map((h, i) => Object.assign({}, h, { rank: i + 1 }));
+  }
+
+  function pickProvider(secret) {
+    const s = (secret || "").trim();
+    if (!s) return { fn: ddgViaJinaReader, config: {} };
+    if (s.indexOf("jina=") === 0) return { fn: jinaSearch, config: { apiKey: s.slice(5).trim() } };
+    if (s.indexOf("brave=") === 0) return { fn: brave, config: { apiKey: s.slice(6).trim() } };
+    if (s.indexOf("google=") === 0) {
+      const m = s.match(/^google=([^|]+)\|cx=(.+)$/);
+      if (!m) throw new Error("google secret must look like: google=<KEY>|cx=<CX>");
+      return { fn: googleCse, config: { apiKey: m[1].trim(), cx: m[2].trim() } };
+    }
+    if (s.indexOf("serpapi=") === 0) return { fn: serpapi, config: { apiKey: s.slice(8).trim() } };
+    if (s.indexOf("bing=") === 0) return { fn: bing, config: { apiKey: s.slice(5).trim() } };
+    throw new Error("unrecognized secret format; see SKILL.md");
+  }
+
+  async function ddgViaJinaReader(query) {
+    const target = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
+    const res = await fetch("https://r.jina.ai/" + target, { headers: { "Accept": "text/plain" } });
+    if (!res.ok) throw new Error("DDG-via-Jina failed: " + res.status);
+    return parseDdgMarkdown(await res.text());
+  }
+
+  function parseDdgMarkdown(md) {
+    const hits = [];
+    const headingRe = /^##\s+\[([^\]]+)\]\(([^)]+)\)\s*$/gm;
+    const seen = new Set();
+    let m;
+    while ((m = headingRe.exec(md)) !== null) {
+      const title = m[1].trim();
+      const redirect = m[2].trim();
+      const url = decodeDdgRedirect(redirect);
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      const after = md.slice(m.index + m[0].length, m.index + m[0].length + 2000);
+      hits.push({ url: url, title: title, snippet: extractFirstSnippet(after) });
+    }
+    return hits;
+  }
+
+  function decodeDdgRedirect(redirect) {
+    try {
+      const u = new URL(redirect, "https://duckduckgo.com");
+      if (AD_MARKERS.some(function (mk) { return redirect.indexOf(mk) >= 0; })) return null;
+      const uddg = u.searchParams.get("uddg");
+      if (uddg) {
+        const decoded = decodeURIComponent(uddg);
+        if (AD_MARKERS.some(function (mk) { return decoded.indexOf(mk) >= 0; })) return null;
+        return decoded;
+      }
+      if (/^https?:\/\//i.test(redirect)) return redirect;
+    } catch (_) { /* pass */ }
+    return null;
+  }
+
+  function extractFirstSnippet(after) {
+    const linkText = after.match(/\[([^\]]{60,})\]\(https?:\/\/duckduckgo\.com\/l\//);
+    if (linkText) return collapseMd(linkText[1]);
+    const lines = after.split(/\n\s*\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const t = lines[i].trim();
+      if (t.length > 60 && t.indexOf("![") !== 0) return collapseMd(t);
+    }
+    return "";
+  }
+
+  function collapseMd(s) { return s.replace(/\*\*/g, "").replace(/\s+/g, " ").trim(); }
+
+  async function jinaSearch(query, cfg) {
+    const res = await fetch("https://s.jina.ai/" + encodeURIComponent(query), {
+      headers: { "Accept": "application/json", "Authorization": "Bearer " + cfg.apiKey, "X-Respond-With": "no-content" },
+    });
+    if (res.status === 401 || res.status === 403) throw new Error("Jina auth failed");
+    if (!res.ok) throw new Error("Jina search failed: " + res.status);
+    const json = await res.json();
+    const data = Array.isArray(json && json.data) ? json.data : [];
+    return data.filter(function (d) { return d && d.url; })
+      .map(function (d) { return { url: d.url, title: d.title || "", snippet: d.description || d.content || "" }; });
+  }
+
+  async function brave(query, cfg) {
+    const url = "https://api.search.brave.com/res/v1/web/search?q=" + encodeURIComponent(query) + "&count=10";
+    const res = await fetch(url, { headers: { "Accept": "application/json", "X-Subscription-Token": cfg.apiKey } });
+    if (res.status === 401 || res.status === 403) throw new Error("Brave auth failed");
+    if (!res.ok) throw new Error("Brave search failed: " + res.status);
+    const json = await res.json();
+    const results = (json.web && json.web.results) || [];
+    return results.map(function (r) { return { url: r.url, title: r.title || "", snippet: r.description || "" }; });
+  }
+
+  async function googleCse(query, cfg) {
+    const url = "https://www.googleapis.com/customsearch/v1?key=" + encodeURIComponent(cfg.apiKey)
+      + "&cx=" + encodeURIComponent(cfg.cx) + "&q=" + encodeURIComponent(query) + "&num=10";
+    const res = await fetch(url);
+    if (res.status === 401 || res.status === 403) throw new Error("Google CSE auth failed");
+    if (!res.ok) throw new Error("Google CSE search failed: " + res.status);
+    const json = await res.json();
+    return (json.items || []).map(function (it) { return { url: it.link, title: it.title || "", snippet: it.snippet || "" }; });
+  }
+
+  async function serpapi(query, cfg) {
+    const url = "https://serpapi.com/search.json?engine=google&q=" + encodeURIComponent(query) + "&num=10&api_key=" + encodeURIComponent(cfg.apiKey);
+    const res = await fetch(url);
+    if (res.status === 401 || res.status === 403) throw new Error("SerpAPI auth failed");
+    if (!res.ok) throw new Error("SerpAPI search failed: " + res.status);
+    const json = await res.json();
+    return (json.organic_results || []).map(function (r) { return { url: r.link, title: r.title || "", snippet: r.snippet || "" }; });
+  }
+
+  async function bing(query, cfg) {
+    const url = "https://api.bing.microsoft.com/v7.0/search?q=" + encodeURIComponent(query) + "&count=10";
+    const res = await fetch(url, { headers: { "Ocp-Apim-Subscription-Key": cfg.apiKey } });
+    if (res.status === 401 || res.status === 403) throw new Error("Bing auth failed");
+    if (!res.ok) throw new Error("Bing search failed: " + res.status);
+    const json = await res.json();
+    const v = (json.webPages && json.webPages.value) || [];
+    return v.map(function (r) { return { url: r.url, title: r.name || "", snippet: r.snippet || "" }; });
+  }
+
+  // ------------------------- EXTRACT -------------------------
+  async function extract(url, opts) {
+    const timeoutMs = (opts && opts.timeoutMs) || 10000;
+    try {
+      const text = await withTimeout(viaJinaReader(url), timeoutMs, "jina-reader");
+      if (text && text.trim().length > 200) return { text: text, failed: false };
+    } catch (_) { /* fall through */ }
+
+    try {
+      const text = await withTimeout(viaDirectFetch(url), timeoutMs, "direct-fetch");
+      return { text: text || "", failed: !text, reason: text ? null : "empty" };
+    } catch (e) {
+      return { text: "", failed: true, reason: String((e && e.message) || e) };
+    }
+  }
+
+  async function viaJinaReader(url) {
+    const res = await fetch("https://r.jina.ai/" + url, { headers: { "Accept": "text/plain", "X-Return-Format": "markdown" } });
+    if (!res.ok) throw new Error("jina-reader " + res.status);
+    return stripReaderBoilerplate(await res.text());
+  }
+
+  function stripReaderBoilerplate(md) {
+    const marker = /\n\s*Markdown Content:\s*\n/i;
+    const m = md.match(marker);
+    const body = m ? md.slice(m.index + m[0].length) : md;
+    return body
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+      .replace(/\[\s*\]\s*\(?[^)]*\)?/g, "")
+      .replace(/\[([^\]]+)\]\(https?:[^)]+\)/g, "$1")
+      .replace(/\((?:https?:[^)]{10,})\)/g, "")
+      .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+      .replace(/^\s*>\s?/gm, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim();
+  }
+
+  async function viaDirectFetch(url) {
+    const res = await fetch(url, {
+      headers: { "Accept": "text/html,application/xhtml+xml" },
+      redirect: "follow",
+    });
+    if (!res.ok) throw new Error("direct-fetch " + res.status);
+    const ct = res.headers.get("content-type") || "";
+    if (ct.indexOf("text/html") < 0 && ct.indexOf("xml") < 0) throw new Error("non-html response");
+    return readabilityLite(await res.text());
+  }
+
+  function readabilityLite(html) {
+    if (typeof DOMParser === "undefined") return "";
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    if (!doc) return "";
+    const junk = doc.querySelectorAll(
+      "script, style, noscript, nav, header, footer, aside, form, iframe, svg, " +
+      "[role=navigation], [role=banner], [role=contentinfo], " +
+      ".nav, .menu, .sidebar, .footer, .header, .ads, .advert, .cookie, .newsletter"
+    );
+    for (let i = 0; i < junk.length; i++) junk[i].remove();
+
+    const candidates = Array.from(doc.querySelectorAll("article, main, section, div"));
+    let best = null, bestScore = 0;
+    for (const node of candidates) {
+      const text = (node.textContent || "").trim();
+      if (text.length < 250) continue;
+      const paragraphs = node.querySelectorAll("p").length;
+      if (paragraphs < 2) continue;
+      const commasPerP = text.split(",").length / Math.max(paragraphs, 1);
+      const linkDensity = linkRatio(node);
+      if (linkDensity > 0.35) continue;
+      const score = text.length * (1 - linkDensity) + paragraphs * 100 + commasPerP * 20;
+      if (score > bestScore) { bestScore = score; best = node; }
+    }
+    const root = best || doc.body;
+    if (!root) return "";
+    const parts = [];
+    const walk = function (node) {
+      for (let i = 0; i < node.childNodes.length; i++) {
+        const child = node.childNodes[i];
+        if (child.nodeType === 3) {
+          const t = (child.textContent || "").trim();
+          if (t) parts.push(t);
+        } else if (child.nodeType === 1) {
+          const tag = child.tagName.toLowerCase();
+          if (tag === "p" || tag === "li" || tag === "h1" || tag === "h2" || tag === "h3") {
+            const t = (child.textContent || "").trim();
+            if (t) parts.push(t);
+            parts.push("\n");
+          } else {
+            walk(child);
+          }
+        }
+      }
+    };
+    walk(root);
+    return parts.join(" ").replace(/\s*\n\s*/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
+  }
+
+  function linkRatio(node) {
+    const total = (node.textContent || "").length || 1;
+    let linked = 0;
+    const anchors = node.querySelectorAll("a");
+    for (let i = 0; i < anchors.length; i++) linked += (anchors[i].textContent || "").length;
+    return linked / total;
+  }
+
+  // ------------------------- DISTILL -------------------------
+  const STOPWORDS = new Set((
+    "a an the and or but if then else for of to in on at by with from as is are was " +
+    "were be been being have has had do does did will would could should may might " +
+    "can this that these those it its i you he she we they them his her their our " +
+    "your my me us what which who whom whose when where why how not no yes so"
+  ).split(/\s+/));
+
+  function distill(text, query, opts) {
+    const maxTokens = (opts && opts.maxTokens) || 500;
+    if (!text || !text.trim()) return "";
+    const sentences = splitSentences(text);
+    if (sentences.length === 0) return "";
+    if (sentences.length <= 3) return sentences.join(" ");
+
+    const queryTerms = tokenize(query);
+    if (queryTerms.length === 0) return sentences.slice(0, budgetCount(sentences, maxTokens)).join(" ");
+
+    const tokenized = sentences.map(tokenize);
+    const df = new Map();
+    for (const toks of tokenized) for (const t of new Set(toks)) df.set(t, (df.get(t) || 0) + 1);
+    const N = tokenized.length;
+    const idf = function (t) { return Math.log((N + 1) / ((df.get(t) || 0) + 1)) + 1; };
+
+    const qSet = new Set(queryTerms);
+    const scored = tokenized.map(function (toks, i) {
+      const tf = new Map();
+      for (const t of toks) tf.set(t, (tf.get(t) || 0) + 1);
+      let score = 0;
+      for (const q of qSet) if (tf.has(q)) score += idf(q) * (1 + Math.log(tf.get(q)));
+      const lengthPenalty = toks.length < 5 ? 0.4 : 1.0;
+      const positionBoost = 1 + Math.max(0, (20 - i)) / 100;
+      return { i: i, score: score * lengthPenalty * positionBoost, len: sentences[i].length };
+    });
+
+    scored.sort(function (a, b) { return b.score - a.score; });
+    const picked = [];
+    let used = 0;
+    for (const s of scored) {
+      if (s.score <= 0 && picked.length >= 3) break;
+      const cost = Math.ceil(s.len / 4);
+      if (used + cost > maxTokens && picked.length >= 2) continue;
+      picked.push(s.i);
+      used += cost;
+      if (used >= maxTokens) break;
+    }
+    if (picked.length === 0) return sentences.slice(0, budgetCount(sentences, maxTokens)).join(" ");
+    picked.sort(function (a, b) { return a - b; });
+    return picked.map(function (i) { return sentences[i]; }).join(" ");
+  }
+
+  function splitSentences(text) {
+    const cleaned = text.replace(/\s+/g, " ").trim();
+    if (!cleaned) return [];
+    const abbrevGuarded = cleaned
+      .replace(/\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e|U\.S|U\.K|No)\./gi, "$1<DOT>");
+    const parts = abbrevGuarded.split(/(?<=[.!?])\s+(?=[A-Z0-9"“‘(])/);
+    return parts.map(function (p) { return p.replace(/<DOT>/g, ".").trim(); }).filter(isProseSentence);
+  }
+
+  function isProseSentence(s) {
+    if (!s || s.length < 30) return false;
+    const letters = (s.match(/[A-Za-z\u00c0-\u024f]/g) || []).length;
+    if (letters < s.length * 0.5) return false;
+    const words = s.split(/\s+/).filter(Boolean).length;
+    if (words < 6) return false;
+    const avgWordLen = letters / words;
+    if (avgWordLen > 12) return false;
+    if (/([A-Z][a-z]+){4,}/.test(s.replace(/\s+/g, ""))) return false;
+    const brackets = (s.match(/[\[\]()]/g) || []).length;
+    if (brackets > s.length * 0.08) return false;
+    if (/^\(?\s*(Photo|Image|Credit|Source|Via)\s+by\b/i.test(s)) return false;
+    if (/\b(Getty|Reuters|AFP|AP Photo|NurPhoto)\b/i.test(s) && s.length < 120) return false;
+    return true;
+  }
+
+  function tokenize(s) {
+    return (s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\u00c0-\u024f\u0600-\u06ff\u0400-\u04ff\s'-]/g, " ")
+      .split(/\s+/)
+      .filter(function (t) { return t && t.length > 1 && !STOPWORDS.has(t); });
+  }
+
+  function budgetCount(sentences, maxTokens) {
+    let used = 0, n = 0;
+    for (const s of sentences) {
+      used += Math.ceil(s.length / 4);
+      n++;
+      if (used >= maxTokens) break;
+    }
+    return n;
+  }
+
+  // ------------------------- FORMAT -------------------------
+  function formatContext(query, sources, opts) {
+    const totalBudget = Math.max(500, (opts && opts.totalBudget) || 2000);
+    const header = '# Web search: "' + escapeQuotes(query) + '"';
+    const footer = "---\nAnswer the user's question using only the sources above. Cite as [S1], [S2], [S3]. If sources disagree, say so briefly.";
+
+    const blocks = sources.map(function (s) {
+      if (!s.text || !s.text.trim()) return "## [S" + s.rank + "] " + titleOf(s) + " — " + s.url + "\n> (fetch failed, skip this source)";
+      return "## [S" + s.rank + "] " + titleOf(s) + " — " + s.url + "\n" + quote(s.text);
+    });
+
+    let out = [header, ""].concat(interleave(blocks, ""), ["", footer]).join("\n");
+    if (estTokens(out) <= totalBudget) return out;
+
+    const headerCost = estTokens([header, "", footer, ""].join("\n") + blocks.map(headerOnly).join("\n"));
+    const perSource = Math.max(80, Math.floor((totalBudget - headerCost) / Math.max(sources.length, 1)));
+    const trimmed = sources.map(function (s) {
+      if (!s.text || !s.text.trim()) return "## [S" + s.rank + "] " + titleOf(s) + " — " + s.url + "\n> (fetch failed, skip this source)";
+      return "## [S" + s.rank + "] " + titleOf(s) + " — " + s.url + "\n" + quote(truncateToTokens(s.text, perSource));
+    });
+    return [header, ""].concat(interleave(trimmed, ""), ["", footer]).join("\n");
+  }
+
+  function titleOf(s) { return (s.title && s.title.trim()) || s.url; }
+  function escapeQuotes(s) { return (s || "").replace(/"/g, '\\"'); }
+  function quote(text) {
+    return text.split(/\n+/).map(function (l) { return "> " + l.trim(); }).filter(function (l) { return l !== "> "; }).join("\n");
+  }
+  function estTokens(t) { return Math.ceil((t || "").length / 4); }
+  function truncateToTokens(text, tokens) {
+    const maxChars = tokens * 4;
+    if (text.length <= maxChars) return text;
+    const cut = text.slice(0, maxChars);
+    const lb = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
+    return (lb > maxChars * 0.6 ? cut.slice(0, lb + 1) : cut) + " …";
+  }
+  function headerOnly(b) { return b.split("\n")[0]; }
+  function interleave(arr, sep) {
+    const out = [];
+    for (let i = 0; i < arr.length; i++) { out.push(arr[i]); if (i < arr.length - 1) out.push(sep); }
+    return out;
+  }
+
+  // ------------------------- UTILS -------------------------
+  function withTimeout(promise, ms, label) {
+    return new Promise(function (resolve, reject) {
+      const t = setTimeout(function () { reject(new Error(label + " timed out after " + ms + "ms")); }, ms);
+      promise.then(function (v) { clearTimeout(t); resolve(v); }, function (e) { clearTimeout(t); reject(e); });
+    });
+  }
+
+  // ------------------------- ENTRY POINT -------------------------
+  function setStatus(msg) {
+    const el = document.getElementById("status");
+    if (el) el.textContent = msg;
+  }
+  function renderSource(s) {
+    const list = document.getElementById("sources");
+    if (!list) return;
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.href = s.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.textContent = s.title || s.url;
+    li.appendChild(a);
+    list.appendChild(li);
+  }
+
+  window["ai_edge_gallery_get_result"] = async function (dataStr, secret) {
+    try {
+      const payload = JSON.parse(dataStr || "{}");
+      const query = payload && payload.query;
+      if (!query || typeof query !== "string") return JSON.stringify({ error: "missing query" });
+
+      setStatus('Searching: "' + query + '"');
+      const hits = await search(query, { secret: secret, topN: 3, timeoutMs: 8000 });
+      if (!hits || hits.length === 0) return JSON.stringify({ error: "no search results" });
+      hits.forEach(renderSource);
+
+      setStatus("Reading " + hits.length + " page" + (hits.length === 1 ? "" : "s") + "…");
+      const pages = await Promise.all(hits.map(function (h) {
+        return extract(h.url, { timeoutMs: 10000 }).catch(function (e) { return { text: "", failed: true, reason: String((e && e.message) || e) }; });
+      }));
+
+      setStatus("Distilling…");
+      const distilled = pages.map(function (p, i) {
+        return {
+          rank: hits[i].rank,
+          url: hits[i].url,
+          title: hits[i].title,
+          text: p.failed ? "" : distill(p.text, query, { maxTokens: 500 }),
+        };
+      });
+
+      const ctx = formatContext(query, distilled, { totalBudget: 2000 });
+      const okCount = distilled.filter(function (d) { return d.text; }).length;
+      setStatus("Done — " + okCount + "/" + hits.length + " sources ready");
+      return JSON.stringify({ result: ctx });
+    } catch (e) {
+      setStatus("Error");
+      return JSON.stringify({ error: String((e && e.message) || e) });
+    }
+  };
+
+  // Also expose internals so the desktop test harness can import them.
+  window["__webSearch"] = { search: search, extract: extract, distill: distill, formatContext: formatContext };
+})();

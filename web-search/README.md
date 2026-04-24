@@ -59,13 +59,10 @@ Gemma writes the final 2–4 sentence answer with citations
 | File | Purpose |
 |---|---|
 | `SKILL.md` | Manifest + prose instructions Gemma reads. Defines the `run_js` contract and the query-rewriting rules. |
-| `scripts/index.html` | Skill entry point. Defines `window.ai_edge_gallery_get_result(data, secret)` that Gallery calls. |
-| `assets/search.js` | Provider adapters (Jina, Brave, Google CSE, SerpAPI, Bing). |
-| `assets/extract.js` | Jina Reader (primary) + DOMParser readability-lite (fallback). |
-| `assets/distill.js` | TF-IDF extractive summarizer, pure JS, no deps. |
-| `assets/format.js` | Token-budgeted markdown block emitter. |
+| `scripts/index.html` | Skill entry point. Loaded by Gallery's webview; loads `index.js` via a plain `<script src>`. |
+| `scripts/index.js` | Self-contained bundle: providers, extractor, distiller, formatter, and `window.ai_edge_gallery_get_result`. No ES-module imports. |
 | `assets/styles.css` | Minimal result card styling. |
-| `tests/test.html` | Desktop harness for iterating without the phone. |
+| `tests/test.html` | Desktop harness — loads the exact same `scripts/index.js` via plain `<script src>`. |
 
 ---
 

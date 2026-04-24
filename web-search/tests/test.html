@@ -10,27 +10,29 @@
     p.hint { color: #555; margin-top: 0; }
     label { display: block; font-weight: 600; margin: 12px 0 4px; }
     input, textarea { width: 100%; font: inherit; padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
-    textarea { min-height: 80px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     button { margin-top: 12px; padding: 8px 14px; font: inherit; font-weight: 600; background: #2563eb; color: white; border: 0; border-radius: 6px; cursor: pointer; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     pre { background: #f6f7f9; border: 1px solid #e2e4e8; border-radius: 6px; padding: 12px; white-space: pre-wrap; word-break: break-word; max-height: 540px; overflow: auto; }
     .timings { color: #555; font-size: 12px; margin: 8px 0 0; }
     .row { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
     .row > * { flex: 1; min-width: 200px; }
+    /* Hidden card host — the bundle writes status/sources into #status / #sources.
+       We reuse those IDs so the bundle is happy, but hide the card in the harness. */
+    #card { display: none; }
   </style>
 </head>
 <body>
   <h1>web-search skill — desktop smoke test</h1>
-  <p class="hint">Loads the real skill modules and calls <code>ai_edge_gallery_get_result</code> the same way Google AI Edge Gallery does. Run from a local static server (CORS requires it).</p>
+  <p class="hint">Loads the same bundle Gallery loads (<code>scripts/index.js</code>) via a plain <code>&lt;script src&gt;</code>, then calls <code>window.ai_edge_gallery_get_result</code>. Run from a local static server (CORS requires it).</p>
 
   <div class="row">
     <div>
       <label for="q">Query</label>
-      <input id="q" placeholder="e.g., Gemma 4 release announcement 2026" value="Gemma 4 release announcement 2026">
+      <input id="q" placeholder="e.g., World Cup 2026 start date" value="World Cup 2026 start date">
     </div>
     <div>
       <label for="secret">Secret (optional)</label>
-      <input id="secret" placeholder="leave blank for Jina default">
+      <input id="secret" placeholder="leave blank for DDG default">
     </div>
   </div>
 
@@ -41,55 +43,55 @@
   <label for="out">Skill output (what Gemma receives)</label>
   <pre id="out">—</pre>
 
-  <script type="module">
-    import { search } from "../assets/search.js";
-    import { extract } from "../assets/extract.js";
-    import { distill } from "../assets/distill.js";
-    import { formatContext } from "../assets/format.js";
+  <!-- IDs the bundle writes into while running. -->
+  <div id="card"><h1 id="status"></h1><ol id="sources"></ol></div>
 
-    const outEl = document.getElementById("out");
-    const timingsEl = document.getElementById("timings");
-    const btn = document.getElementById("go");
+  <!-- Same non-module bundle Gallery executes. Must load before our driver. -->
+  <script src="../scripts/index.js"></script>
+  <script>
+    (function () {
+      const outEl = document.getElementById("out");
+      const timingsEl = document.getElementById("timings");
+      const btn = document.getElementById("go");
+      const W = window.__webSearch;
 
-    btn.addEventListener("click", async () => {
-      const query = document.getElementById("q").value.trim();
-      const secret = document.getElementById("secret").value.trim();
-      if (!query) return;
+      btn.addEventListener("click", async function () {
+        const query = document.getElementById("q").value.trim();
+        const secret = document.getElementById("secret").value.trim();
+        if (!query) return;
+        btn.disabled = true;
+        outEl.textContent = "Running…";
+        timingsEl.textContent = "";
+        document.getElementById("sources").innerHTML = "";
 
-      btn.disabled = true;
-      outEl.textContent = "Running…";
-      timingsEl.textContent = "";
+        const tStart = performance.now();
+        try {
+          const t0 = performance.now();
+          const hits = await W.search(query, { secret: secret, topN: 3, timeoutMs: 8000 });
+          const tSearch = performance.now() - t0;
 
-      const tStart = performance.now();
-      try {
-        const t0 = performance.now();
-        const hits = await search(query, { secret, topN: 3, timeoutMs: 8000 });
-        const tSearch = performance.now() - t0;
+          const t1 = performance.now();
+          const pages = await Promise.all(hits.map(function (h) {
+            return W.extract(h.url, { timeoutMs: 10000 }).catch(function (e) { return { text: "", failed: true, reason: String((e && e.message) || e) }; });
+          }));
+          const tFetch = performance.now() - t1;
 
-        const t1 = performance.now();
-        const pages = await Promise.all(
-          hits.map(h => extract(h.url, { timeoutMs: 10000 }).catch(e => ({ text: "", failed: true, reason: String(e?.message || e) })))
-        );
-        const tFetch = performance.now() - t1;
+          const t2 = performance.now();
+          const distilled = pages.map(function (p, i) {
+            return { rank: hits[i].rank, url: hits[i].url, title: hits[i].title, text: p.failed ? "" : W.distill(p.text, query, { maxTokens: 500 }) };
+          });
+          const ctx = W.formatContext(query, distilled, { totalBudget: 2000 });
+          const tDistill = performance.now() - t2;
 
-        const t2 = performance.now();
-        const distilled = pages.map((p, i) => ({
-          rank: hits[i].rank, url: hits[i].url, title: hits[i].title,
-          text: p.failed ? "" : distill(p.text, query, { maxTokens: 500 }),
-        }));
-        const ctx = formatContext(query, distilled, { totalBudget: 2000 });
-        const tDistill = performance.now() - t2;
-
-        const tTotal = performance.now() - tStart;
-        timingsEl.textContent =
-          `search ${Math.round(tSearch)}ms · fetch×3 ${Math.round(tFetch)}ms · distill ${Math.round(tDistill)}ms · total ${Math.round(tTotal)}ms · ~${Math.ceil(ctx.length / 4)} tokens`;
-        outEl.textContent = ctx;
-      } catch (e) {
-        outEl.textContent = "ERROR: " + (e?.message || e);
-      } finally {
-        btn.disabled = false;
-      }
-    });
+          timingsEl.textContent = "search " + Math.round(tSearch) + "ms · fetch×" + hits.length + " " + Math.round(tFetch) + "ms · distill " + Math.round(tDistill) + "ms · total " + Math.round(performance.now() - tStart) + "ms · ~" + Math.ceil(ctx.length / 4) + " tokens";
+          outEl.textContent = ctx;
+        } catch (e) {
+          outEl.textContent = "ERROR: " + ((e && e.message) || e);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    })();
   </script>
 </body>
 </html>
